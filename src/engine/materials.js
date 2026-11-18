@@ -43,15 +43,15 @@ export function groundMaterial(map, aux, U) {
   const m = new THREE.MeshLambertMaterial({ map });
   m.userData.perTile = true;
   m.userData.aux = aux;
-  m.customProgramCacheKey = () => 'hyd-ground-14';
+  m.customProgramCacheKey = () => 'hyd-ground-25';
   m.onBeforeCompile = (sh) => {
-    Object.assign(sh.uniforms, { uAux: { value: aux }, uNight: U.uNight, uSunView: U.uSunView, uTime: U.uTime, uSkyH: U.uSkyH, uSkyZ: U.uSkyZ });
+    Object.assign(sh.uniforms, { uAux: { value: aux }, uNight: U.uNight, uSunView: U.uSunView, uTime: U.uTime, uSkyH: U.uSkyH, uSkyZ: U.uSkyZ, uGlint: U.uGlint, uWaveN: U.uWaveN, uWaveR: U.uWaveR });
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec2 vGW;')
       .replace('#include <fog_vertex>', '#include <fog_vertex>\n vGW = (modelMatrix * vec4(transformed, 1.0)).xz;');
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
-        uniform sampler2D uAux; uniform float uNight; uniform float uTime; uniform vec3 uSunView; uniform vec3 uSkyH; uniform vec3 uSkyZ; varying vec2 vGW;
+        uniform sampler2D uAux; uniform float uNight; uniform float uTime; uniform vec3 uSunView; uniform vec3 uSkyH; uniform vec3 uSkyZ; uniform float uGlint; uniform float uWaveN; uniform float uWaveR; varying vec2 vGW;
         float gh(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
         float gn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
           return mix(mix(gh(i), gh(i + vec2(1, 0)), f.x), mix(gh(i + vec2(0, 1)), gh(i + vec2(1, 1)), f.x), f.y); }
@@ -59,11 +59,12 @@ export function groundMaterial(map, aux, U) {
         // x = height, yz = slope (world x/z)
         vec3 waves(vec2 p, float t, float fw) {
           vec3 r = vec3(0.0);
-          p += vec2(gn(p * 0.07 + 3.0 + t * 0.03), gn(p * 0.07 + 11.0 - t * 0.03)) * 5.0;
+          p += vec2(gn(p * 0.07 + 3.0 + t * 0.03), gn(p * 0.07 + 11.0 - t * 0.03)) * 9.0;
           for (int i = 0; i < 12; i++) {
-            float fi = float(i), ang = fi * 2.399 + 0.5, k = 0.35 * pow(1.4, fi);
+            if (float(i) >= uWaveN) break;                                           // fewer waves on weaker settings
+            float fi = float(i), ang = 0.6 + (fract(sin(fi * 12.9898 + 1.3) * 43758.5453) - 0.5) * 2.7, k = 0.6 * pow(uWaveR, fi) * (0.82 + 0.36 * fract(sin(fi * 78.233 + 4.1) * 43758.5453));   // sizes jittered: no regular rows
             vec2 d = vec2(cos(ang), sin(ang));
-            float a = 0.05 * pow(k, -0.85) * (1.0 - smoothstep(0.35, 1.0, k * fw));   // a wave smaller than a few pixels fades out (no shimmer)
+            float a = 0.045 * pow(k, -0.75) * (1.0 - smoothstep(0.35, 1.0, k * fw));   // a wave smaller than a few pixels fades out (no shimmer)
             float ph = dot(d, p) * k + t * sqrt(9.8 * k) * 0.45 + fi * 1.7;
             r.x += a * sin(ph);
             r.yz += d * (a * k * cos(ph));
@@ -82,6 +83,8 @@ export function groundMaterial(map, aux, U) {
         float bare = 1.0 - smoothstep(0.0, 0.06, gr);
         diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.66, 0.62, 0.55) * (0.8 + 0.4 * lg), bare * 0.45);   // flatten blotchy bare earth
         diffuseColor.rgb *= 1.0 - 0.3 * mk.b;
+        float sand = smoothstep(0.06, 0.36, mk.g) * (1.0 - smoothstep(0.4, 0.62, mk.g));                // just above the water line: damp, darker, a touch cooler
+        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.80, 0.72, 0.60), sand * 0.9);
         // water: clear teal with soft depth patches, a pale shallow rim at the shore and moving ripples
         float wet = smoothstep(0.35, 0.65, mk.g);
         float wfade = fwidth(vGW.x);                            // small waves fade out with distance (no shimmer)
@@ -89,15 +92,21 @@ export function groundMaterial(map, aux, U) {
         if (wet > 0.0) wvG = waves(vGW, uTime, wfade);
         if (wet > 0.0) {
           float dp = gn(vGW * 0.012) * 0.6 + gn(vGW * 0.05 + 7.0) * 0.4;
-          vec3 deep = vec3(0.03, 0.11, 0.14), shallow = vec3(0.10, 0.24, 0.22);          // dark body; the sky reflection on top gives the colour
-          vec3 wc = mix(vec3(0.06, 0.17, 0.19), mix(shallow, deep, smoothstep(0.2, 0.8, dp)), 0.6);
-          float rim = 1.0 - smoothstep(0.55, 1.0, mk.g);                                  // only near the shore line
-          wc = mix(wc, vec3(0.38, 0.44, 0.38), rim * 0.4);
-          float rip = gn(vGW * 0.9 + vec2(uTime * 0.35, uTime * 0.2)) * 0.6 + gn(vGW * 2.3 - vec2(uTime * 0.25, 0.0)) * 0.4;
-          wc *= 0.98 + 0.04 * rip;
+          vec3 deep = vec3(0.08, 0.25, 0.23), shallow = vec3(0.18, 0.38, 0.33);          // calm green-teal; the sky reflection on top adds the sheen
+          vec3 wc = mix(vec3(0.12, 0.31, 0.29), mix(shallow, deep, smoothstep(0.2, 0.8, dp)), 0.4);
+          float rim = 1.0 - smoothstep(0.5, 1.0, mk.g);                                   // the last few metres: the sandy bottom shows through
+          wc = mix(wc, vec3(0.40, 0.44, 0.36), rim * rim * 0.5);
           vec3 wv = wvG;
-          wc *= 1.0 + clamp(wv.x * 1.8, -0.35, 0.3);                                                        // crests catch light, troughs go darker
+          wc *= 1.0 + clamp(dot(wv.yz, vec2(0.29, 0.96)) * 2.4, -0.4, 0.32);    // faces tilted toward the light are lighter, the others darker: crisp facets                                                        // crests catch light, troughs go darker
+          wc *= 0.38;                                                                     // the scene light is strong: keep the water a deep sea-green once lit
           diffuseColor.rgb = mix(diffuseColor.rgb, wc, wet * 0.95);
+          // shore foam: thin lines that wash in along the water's edge, broken up by smooth noise; thins out with distance and at night
+          float band = smoothstep(0.34, 0.5, mk.g) * (1.0 - smoothstep(0.58, 0.8, mk.g));
+          vec2 fp = vGW + vec2(gn(vGW * 0.5 + 2.0), gn(vGW * 0.5 + 9.0)) * 3.0;                          // wobble so the lines are not straight
+          float lace = gn(fp * 1.1 + vec2(uTime * 0.10, 0.0)) * 0.6 + gn(fp * 2.9 - vec2(0.0, uTime * 0.14)) * 0.4;
+          float wash = 0.5 + 0.5 * sin(mk.g * 34.0 - uTime * 0.9 + lace * 3.0);
+          float foam = smoothstep(0.35, 0.95, lace * 0.55 + wash * 0.6) * band * (1.0 - smoothstep(4.0, 22.0, wfade)) * (1.0 - 0.7 * uNight);
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.90, 0.94, 0.92), foam * 0.16);
         }
         // close-up grain so the 10 m imagery does not look smeared underfoot
         float fw = fwidth(vGW.x);
@@ -110,17 +119,19 @@ export function groundMaterial(map, aux, U) {
           vec3 wn = normalize(normal + vec3(sin(rp.x + uTime * 1.3) * 0.03, 0.0, cos(rp.y * 1.1 + uTime) * 0.03));
           if (mk.g > 0.35) {                              // real moving slopes on water: sun glitter that travels with the waves
             vec3 wv2 = wvG;
-            wn = normalize(normal + (viewMatrix * vec4(-wv2.y, 0.0, -wv2.z, 0.0)).xyz * 0.85);
+            wn = normalize(normal + (viewMatrix * vec4(-wv2.y, 0.0, -wv2.z, 0.0)).xyz * 1.3);
           }
           float spec = pow(max(dot(reflect(-uSunView, wn), vdir), 0.0), 90.0);
           totalEmissiveRadiance += vec3(1.0, 0.9, 0.75) * spec * mk.g * 2.2 * (1.0 - uNight);
+          float glint = pow(max(dot(reflect(-uSunView, wn), vdir), 0.0), uGlint);          // sparse, sharp sparkles on the wave tops
+          totalEmissiveRadiance += vec3(1.0, 0.95, 0.85) * glint * mk.g * (uGlint > 1000.0 ? 7.0 : 4.0) * (1.0 - uNight);
           if (mk.g > 0.05) {                              // the water mirrors the sky: stronger toward the horizon, broken up by the moving waves
             vec3 up = normalize((viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
             vec3 rr = reflect(-vdir, wn);
             vec3 sk = mix(uSkyH, uSkyZ, clamp(dot(rr, up) * 1.6, 0.0, 1.0));
             float nv = clamp(dot(wn, vdir), 0.0, 1.0);
             float fr = clamp(0.04 + 0.96 * pow(1.0 - nv, 4.5), 0.0, 1.0);
-            totalEmissiveRadiance += sk * fr * smoothstep(0.1, 0.6, mk.g) * 0.42;
+            totalEmissiveRadiance += sk * fr * smoothstep(0.1, 0.6, mk.g) * 0.2;
           }
           totalEmissiveRadiance += vec3(1.0, 0.56, 0.2) * uNight * (mk.r * 0.0 + mk.b * 0.07);
         }`);

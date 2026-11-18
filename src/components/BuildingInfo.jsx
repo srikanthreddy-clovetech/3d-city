@@ -4,7 +4,7 @@ import { makeCode } from '../buildingId.js';
 
 const MAX_EXTRA = 8;
 
-export default function BuildingInfo({ info, saved, onSave, onDelete, onClose, onEditing, onCopy, rail, float, editMode }) {
+export default function BuildingInfo({ info, saved, onSave, onDelete, onClose, onEditing, onCopy, rail, float, editMode, onModel }) {
   const [editing, setEditing] = useState(false);
   const [f, setF] = useState(null);
   const [err, setErr] = useState('');
@@ -98,6 +98,12 @@ export default function BuildingInfo({ info, saved, onSave, onDelete, onClose, o
             </div>
           )}
           {!saved && editMode && <button type="button" className="link" onClick={start}>+ Save details for this building</button>}
+          {editMode && onModel && (
+            <div className="idrow modelrow">
+              <span className="idlab">Model</span>
+              <button type="button" className="chip" onClick={() => onModel('hide')}>Hide building</button>
+            </div>
+          )}
         </>
       )}
 

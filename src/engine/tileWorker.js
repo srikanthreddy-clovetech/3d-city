@@ -150,11 +150,13 @@ function paint(ofm, buildingsVT, S, mpp, sat, b, trees) {
   const color = new OffscreenCanvas(S, S), c = color.getContext('2d', { willReadFrequently: true });
   const aux = new OffscreenCanvas(S, S), a = aux.getContext('2d', { willReadFrequently: true });
   a.fillStyle = '#000'; a.fillRect(0, 0, S, S); a.globalCompositeOperation = 'lighter';
+  // water goes into its own mask first and is blurred into the aux image at the end: the shoreline becomes a soft, round ramp
+  const wmask = new OffscreenCanvas(S, S), wg = wmask.getContext('2d');
   const px = (m) => Math.max(0.8, m / mpp);
   if (sat) {
     c.imageSmoothingEnabled = true; c.imageSmoothingQuality = 'high';
     c.drawImage(sat, 0, 0, S, S);
-    if (ofm) satOverlays(ofm, c, a, S, px);
+    if (ofm) satOverlays(ofm, c, a, S, px, wg);
   } else {
     c.fillStyle = '#c8b699'; c.fillRect(0, 0, S, S);              // Deccan earth (map-style fallback)
   }
@@ -169,13 +171,13 @@ function paint(ofm, buildingsVT, S, mpp, sat, b, trees) {
       if (f.type !== 3) return;
       const p = pathOf(f, s);
       c.fillStyle = f.properties.class === 'swimming_pool' ? '#4fa3b5' : '#2d525c'; c.fill(p);
-      a.fillStyle = '#00ff00'; a.fill(p);
+      wg.fillStyle = '#00ff00'; wg.fill(p);
     });
     each('waterway', (f, s) => {
       const w = WATERWAY[f.properties.class]; if (!w || f.properties.brunnel === 'tunnel') return;
       const p = pathOf(f, s);
       c.strokeStyle = '#2d525c'; c.lineWidth = px(w); c.lineCap = 'round'; c.stroke(p);
-      a.strokeStyle = '#00ff00'; a.lineWidth = px(w); a.stroke(p);
+      wg.strokeStyle = '#00ff00'; wg.lineWidth = px(w); wg.lineCap = 'round'; wg.stroke(p);
     });
     // roads: casing then fill, minor first
     const order = ['path', 'track', 'service', 'minor', 'tertiary', 'secondary', 'primary', 'trunk', 'motorway', 'rail'];
@@ -220,26 +222,28 @@ function paint(ofm, buildingsVT, S, mpp, sat, b, trees) {
       a.fillStyle = gr; a.fillRect(cx - r, cy - r, r * 2, r * 2);
     }
   }
+  a.save(); try { a.filter = `blur(${Math.max(1, px(6)).toFixed(1)}px)`; } catch { /* no canvas filters: the edge stays hard */ }
+  a.drawImage(wmask, 0, 0); a.restore();
   const half = new OffscreenCanvas(Math.max(64, S >> 1), Math.max(64, S >> 1));   // masks are soft: half resolution is plenty
   half.getContext('2d').drawImage(aux, 0, 0, half.width, half.height);
   return { color: color.transferToImageBitmap(), aux: half.transferToImageBitmap() };
 }
 
 // On top of satellite imagery: sharpen what 10 m pixels blur (lake edges, roads), keep the photo.
-function satOverlays(ofm, c, a, S, px) {
+function satOverlays(ofm, c, a, S, px, wg) {
   const L = ofm.layers;
   const each = (name, fn) => { const l = L[name]; if (!l) return; const s = S / l.extent; for (let i = 0; i < l.length; i++) fn(l.feature(i), s); };
   each('water', (f, s) => {
     if (f.type !== 3) return;
     const p = pathOf(f, s);
     c.fillStyle = 'rgba(28,66,74,0.55)'; c.fill(p);
-    a.fillStyle = '#00ff00'; a.fill(p);
+    wg.fillStyle = '#00ff00'; wg.fill(p);
   });
   each('waterway', (f, s) => {
     const w = WATERWAY[f.properties.class]; if (!w || f.properties.brunnel === 'tunnel') return;
     const p = pathOf(f, s);
     c.strokeStyle = 'rgba(28,66,74,0.5)'; c.lineWidth = px(w); c.lineCap = 'round'; c.stroke(p);
-    a.strokeStyle = '#00ff00'; a.lineWidth = px(w); a.stroke(p);
+    wg.strokeStyle = '#00ff00'; wg.lineWidth = px(w); wg.lineCap = 'round'; wg.stroke(p);
   });
   const roads = L.transportation; if (!roads) return;
   const s = S / roads.extent, byClass = {};
@@ -354,9 +358,11 @@ function applyFixes(list, b) {
 
 // Hand edits (edits.js): buildings to leave out, given as points inside them, and roads to add, given as local-metre lines.
 let curHide = [], curRoads = [], curTanks = [], tankSpecs = [];
-function hideBuildings(list) {
+function hideBuildings(list, b) {
+  const near = (x, y) => x >= b.x0 - 12 && x < b.x0 + b.size + 12 && y <= b.y1 + 12 && y > b.y1 - b.size - 12;
   for (let k = 0; k + 1 < curHide.length; k += 2) {
     const fx = curHide[k], fy = curHide[k + 1];
+    if (!near(fx, fy)) continue;
     let at = -1, bd = 3;
     for (let i = 0; i < list.length; i++) {                     // the footprint that contains the point, else the nearest centre within 3 m
       const P = list[i].pts, n = P.length / 2; let inside = false, mx = 0, my = 0;
@@ -374,6 +380,7 @@ function hideBuildings(list) {
   // water tanks: the footprint is replaced by a round tank (built later by waterTanks)
   for (let k = 0; k + 1 < curTanks.length; k += 2) {
     const fx = curTanks[k], fy = curTanks[k + 1];
+    if (!near(fx, fy)) continue;
     let at = -1, bd = 3;
     for (let i = 0; i < list.length; i++) {
       const P = list[i].pts, n = P.length / 2; let inside = false, mx = 0, my = 0;
@@ -412,12 +419,29 @@ function addRoads(ofm, b) {
   const tr = ofm && ofm.layers && ofm.layers.transportation;
   if (!tr || !curRoads.length) return;
   const sc = b.size / tr.extent, extra = [];
+  // Catmull-Rom curve through the clicked points (6 steps per segment) so a road with bends is drawn round, not as corners
+  const smooth = (P) => {
+    const c = P.length / 2, out = [];
+    for (let i = 0; i < c - 1; i++) {
+      const a = Math.max(i - 1, 0), d = Math.min(i + 2, c - 1);
+      for (let s = 0; s < 6; s++) {
+        const t = s / 6, t2 = t * t, t3 = t2 * t;
+        for (let k = 0; k < 2; k++) {
+          const p0 = P[a * 2 + k], p1 = P[i * 2 + k], p2 = P[(i + 1) * 2 + k], p3 = P[d * 2 + k];
+          out.push(0.5 * (2 * p1 + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3));
+        }
+      }
+    }
+    out.push(P[(c - 1) * 2], P[(c - 1) * 2 + 1]);
+    return out;
+  };
   for (const r of curRoads) {
     const P = r.pts, c = P.length / 2;
     let mx = 0, my = 0; for (let i = 0; i < c; i++) { mx += P[i * 2]; my += P[i * 2 + 1]; }
     mx /= c; my /= c;
     if (mx < b.x0 || mx >= b.x0 + b.size || my > b.y1 || my <= b.y1 - b.size) continue;       // each road belongs to the tile that holds its middle
-    const g = []; for (let i = 0; i < c; i++) g.push({ x: (P[i * 2] - b.x0) / sc, y: (b.y1 - P[i * 2 + 1]) / sc });
+    const Q = c >= 3 ? smooth(P) : P, qc = Q.length / 2;
+    const g = []; for (let i = 0; i < qc; i++) g.push({ x: (Q[i * 2] - b.x0) / sc, y: (b.y1 - Q[i * 2 + 1]) / sc });
     extra.push({ properties: { class: r.cls }, type: 2, extent: tr.extent, loadGeometry: () => [g.map((p) => ({ x: p.x, y: p.y }))] });
   }
   if (!extra.length) return;
@@ -544,7 +568,7 @@ function buildingsMesh(vt, b, layerName, z) {
     }
   }
   if (!list.length) return null;
-  if (z >= 13) { applyKnownTowers(list, b); applyFixes(list, b); hideBuildings(list); }
+  if (z >= 13) { applyKnownTowers(list, b); applyFixes(list, b); hideBuildings(list, b); }
 
   const FLOOR = 3.2, BAY = 3.4;
   const FLAT_ROOFS = true;       // Hyderabad houses have flat RCC terraces: no hipped or pitched roofs on ordinary buildings (landmarks keep theirs)
@@ -778,18 +802,47 @@ function roadRibbons(ofm, b) {
   });
   const gLen = new Map();
   br.forEach((q, i) => { const r = find(i); gLen.set(r, Math.max(gLen.get(r) || 0, q.len)); });
+  // Deck heights. A way's two ends either come down to the ground (a real ramp), or stay up at deck level when the flyover goes on:
+  // at the tile edge (the next tile carries it on), where it ends against another way of the same flyover (a split in the middle),
+  // or where a ramp merges into the side of the main deck (the ramp then meets the deck at the deck's own height).
+  const smoother = (t) => t * t * t * (t * (6 * t - 15) + 10);          // zero slope and zero curvature at both ends: a gentle, even ramp
+  const onEdge = (x, y) => x < b.x0 + 1.5 || x > b.x0 + b.size - 1.5 || y > b.y1 - 1.5 || y < b.y1 - b.size + 1.5;
+  const live = [];
   br.forEach((q, i) => {
-    const { item, c, cum, len } = q, pts = item.pts, rise = bridgeRise(gLen.get(find(i))), lift = ROAD_LIFT[item.cls];
-    if (rise < 0.8) return;
-    const gA = meshHeight(pts[0], pts[1]) + lift, gB = meshHeight(pts[c * 2 - 2], pts[c * 2 - 1]) + lift, ramp = Math.min(len / 2, 70);
+    q.rise = bridgeRise(gLen.get(find(i))); q.lift = ROAD_LIFT[q.item.cls]; q.g = find(i);
+    if (q.rise >= 0.8) live.push(q);
+  });
+  const profile = (q, A, B) => {                                         // A, B: { up, h } for the first and last point
+    const { item, c, cum, len, rise, lift } = q, pts = item.pts;
+    const ramp = Math.min(len / 2, Math.max(70, rise * 22));             // about a 4.5 % grade: long enough to look gentle
+    const hA = A.up ? A.h - rise : meshHeight(pts[0], pts[1]) + lift, hB = B.up ? B.h - rise : meshHeight(pts[c * 2 - 2], pts[c * 2 - 1]) + lift;
     const ys = new Float32Array(c);
     for (let k = 0; k < c; k++) {
-      const t = Math.min(1, Math.min(cum[k], len - cum[k]) / ramp), sm = t * t * (3 - 2 * t);
-      ys[k] = Math.max(meshHeight(pts[k * 2], pts[k * 2 + 1]) + lift, gA + (gB - gA) * cum[k] / len + rise * sm);
+      const sa = A.up ? 1 : smoother(Math.min(1, cum[k] / ramp)), sb = B.up ? 1 : smoother(Math.min(1, (len - cum[k]) / ramp));
+      ys[k] = Math.max(meshHeight(pts[k * 2], pts[k * 2 + 1]) + lift, hA + (hB - hA) * cum[k] / len + rise * Math.min(sa, sb));
     }
-    item.ys = ys;
-    deckPts.push({ pts, ys, w: item.w, g: find(i) });
-  });
+    return ys;
+  };
+  const endOf = (q, last, ys) => {                                       // how the way ends at its first or last point
+    const pts = q.item.pts, k = last ? q.c - 1 : 0, x = pts[k * 2], y = pts[k * 2 + 1], full = meshHeight(x, y) + q.lift + q.rise;
+    if (onEdge(x, y)) return { up: true, h: full };
+    if (ys) for (const o of live) {                                      // against another way of the same flyover?
+      if (o === q || o.g !== q.g || !o.item.ys) continue;
+      const P = o.item.pts;
+      for (let m = 0; m < o.c; m++) {
+        if (Math.hypot(P[m * 2] - x, P[m * 2 + 1] - y) > 7) continue;
+        return { up: true, h: m === 0 || m === o.c - 1 ? full : o.item.ys[m] };    // end to end: full height; into the side of a deck: that deck's height
+      }
+    }
+    return { up: false, h: 0 };
+  };
+  for (const q of live) q.item.ys = profile(q, endOf(q, false, false), endOf(q, true, false));        // first pass: ends at the ground unless at a tile edge
+  for (const q of live) {                                                // second pass: join up where ways meet each other
+    const A = endOf(q, false, true), B = endOf(q, true, true);
+    if (A.up || B.up) q.next = profile(q, A, B);
+  }
+  for (const q of live) if (q.next) q.item.ys = q.next;
+  for (const q of live) deckPts.push({ pts: q.item.pts, ys: q.item.ys, w: q.item.w, g: q.g });
   const out = sets.map((list) => {
     let nv = 0, ni = 0;
     for (const l of list) { const c = l.pts.length / 2; nv += c * 2; ni += (c - 1) * 6; }
@@ -979,6 +1032,8 @@ function bridgeDecks(list, under) {
   const roadBelow = (px, py) => {
     for (const r of under) {
       const R = r.pts, m = R.length / 2, lim = r.w / 2 + 2.5;
+      if (!r.bb) { let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; for (let q = 0; q < m; q++) { x0 = Math.min(x0, R[q * 2]); x1 = Math.max(x1, R[q * 2]); y0 = Math.min(y0, R[q * 2 + 1]); y1 = Math.max(y1, R[q * 2 + 1]); } r.bb = [x0 - lim, y0 - lim, x1 + lim, y1 + lim]; }
+      if (px < r.bb[0] || px > r.bb[2] || py < r.bb[1] || py > r.bb[3]) continue;             // far from this road: no need to test its segments
       for (let q = 1; q < m; q++) {
         const ax = R[q * 2 - 2], ay = R[q * 2 - 1], bx = R[q * 2], by = R[q * 2 + 1], dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy || 1;
         const s = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / L2));

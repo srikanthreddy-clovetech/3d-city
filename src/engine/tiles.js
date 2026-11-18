@@ -180,6 +180,23 @@ export class TileManager {
     for (const f of this.fixes) if (f.x >= b.x0 - 10 && f.x < b.x1 + 10 && f.y >= b.y0 - 10 && f.y < b.y1 + 10) out.push(f.x, f.y, f.h);
     return out;
   }
+  /** hand edits changed (hidden buildings, water tanks, added roads): rebuild the building tiles they touch */
+  setEdits(next) {
+    const pts = (e) => { const m = new Map(); const f = e.hide || []; for (let k = 0; k + 1 < f.length; k += 2) m.set('h' + f[k].toFixed(1) + ',' + f[k + 1].toFixed(1), [f[k], f[k + 1]]);
+      const t = e.tanks || []; for (let k = 0; k + 1 < t.length; k += 2) m.set('t' + t[k].toFixed(1) + ',' + t[k + 1].toFixed(1), [t[k], t[k + 1]]);
+      for (const r of e.roads || []) { let mx = 0, my = 0; const c = r.pts.length / 2; for (let i = 0; i < c; i++) { mx += r.pts[i * 2]; my += r.pts[i * 2 + 1]; } m.set('r' + r.cls + r.pts.map((v) => v.toFixed(1)).join(';'), [mx / c, my / c]); }
+      return m; };
+    const a = pts(this.edits || {}), b = pts(next), changed = [];
+    for (const [k, v] of a) if (!b.has(k)) changed.push(v);
+    for (const [k, v] of b) if (!a.has(k)) changed.push(v);
+    this.edits = next;
+    for (const [x, y] of changed) {
+      for (const n of this.nodes.values()) {
+        if (n.z < 13 || n.state !== 'ready' || n.refreshing) continue;
+        if (x >= n.b.x0 - 12 && x < n.b.x1 + 12 && y >= n.b.y0 - 12 && y < n.b.y1 + 12) { n.refreshing = true; this.request(n, true); }
+      }
+    }
+  }
   /** a new list of typed-in heights: rebuild the building tiles that contain a changed one */
   setFixes(list) {
     const key = (f) => `${f.x.toFixed(1)},${f.y.toFixed(1)},${f.h}`;

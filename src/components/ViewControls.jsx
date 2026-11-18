@@ -17,7 +17,7 @@ export default function ViewControls({ view, needleRef, onNorth, onZoomIn, onZoo
       <div className="panel vc" role="group" aria-label="View controls">
         <button type="button" className="icon compass" title="Face north" aria-label="Face north" onClick={onNorth}>
           <svg ref={needleRef} width="22" height="22" viewBox="-11 -11 22 22" aria-hidden="true" focusable="false">
-            <path d="M0-9 L4 2 L0 0 L-4 2 Z" fill="#3cc8b4" />
+            <path d="M0-9 L4 2 L0 0 L-4 2 Z" fill="#f48120" />
             <path d="M0 9 L4 2 L0 0 L-4 2 Z" fill="#6e7882" />
           </svg>
         </button>

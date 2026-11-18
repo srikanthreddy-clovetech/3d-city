@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { metres } from '../places.js';
+import MapEdits from './MapEdits.jsx';
 
 const fmt = (h) => `${String(Math.floor(h) % 24).padStart(2, '0')}:${String(Math.floor((h % 1) * 60)).padStart(2, '0')}`;
 const fmtDeg = (v, p, n) => `${Math.abs(v).toFixed(4)}° ${v >= 0 ? p : n}`;
@@ -15,7 +16,7 @@ function Switch({ on, onChange, label }) {
 
 // One panel for everything: where you are, places, time of day and map settings.
 export default function SidePanel({ view, time, places, custom, layers, onToggle, traffic, onTraffic, quality, onQuality,
-  onFly, onAdd, onRemove, onSlide, onPreset, onAbout, aboutOpen, editMode, onEditMode, showEditSwitch }) {
+  onFly, onAdd, onRemove, onSlide, onPreset, onAbout, aboutOpen, editMode, onEditMode, showEditSwitch, mapEdits, drawing, onDraw, onDrawCancel, onDrawFinish, onSelectRoad, onRemoveEdit, onCopyEdits }) {
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState('');
   const chips = useRef(null);
@@ -119,6 +120,8 @@ export default function SidePanel({ view, time, places, custom, layers, onToggle
           </select>
         </div>
       </div>
+
+      {editMode && mapEdits && <MapEdits edits={mapEdits} drawing={drawing} onDraw={onDraw} onCancel={onDrawCancel} onFinish={onDrawFinish} onSelect={onSelectRoad} onRemove={onRemoveEdit} onCopy={onCopyEdits} />}
 
       <footer className="sp-foot">
         <button type="button" className="sp-about" aria-expanded={aboutOpen} onClick={onAbout}>About this map and how to move around</button>

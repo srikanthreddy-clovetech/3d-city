@@ -26,8 +26,8 @@ export const QUALITY = {
   lite:   { r14: 900,  r13: 3000,  far: 12000, canvas: 384,  seg: 32, cache: 30,  pr: 1,    shadows: 0,    cars: 0,    trees: 0,    bloom: false },
   low:    { r14: 1200, r13: 5000,  far: 18000, canvas: 512,  seg: 48, cache: 40,  pr: 1,    shadows: 0,    cars: 500,  trees: 1500, bloom: true },
   medium: { r14: 1600, r13: 7000,  far: 24000, canvas: 512,  seg: 64, cache: 55,  pr: 1,    shadows: 2048, shadowEvery: 0.06, shadowMax: 1100, cars: 1200, trees: 3000, bloom: true },
-  high:   { r14: 2100, r13: 9500,  far: 30000, canvas: 640,  seg: 64, cache: 75,  pr: 1.25, shadows: 2048, shadowMax: 1500, cars: 2400, trees: 5000, bloom: true },
-  ultra:  { ao: true, r14: 3200, r13: 13000, far: 38000, canvas: 1024, seg: 64, cache: 100, pr: 1.5,  shadows: 4096, shadowMax: 2400, cars: 4000, trees: 8000, bloom: true },
+  high:   { r14: 2100, r13: 9500,  far: 30000, canvas: 640,  seg: 64, cache: 75,  pr: 1.25, shadows: 2048, shadowEvery: 0.05, shadowMax: 1500, cars: 2400, trees: 5000, bloom: true },
+  ultra:  { ao: true, r14: 3200, r13: 13000, far: 38000, canvas: 1024, seg: 64, cache: 100, pr: 1.5,  shadows: 4096, shadowEvery: 0.04, shadowMax: 2400, cars: 4000, trees: 8000, bloom: true },
 };
 export const LEVELS = ['lite', 'low', 'medium', 'high', 'ultra'];
 
@@ -161,7 +161,7 @@ export async function createEngine(o) {
   composer.addPass(bloom);
   composer.addPass(new OutputPass());
 
-  const U = { uNight: { value: 0 }, uTime: { value: 0 }, uSkyH: { value: new THREE.Vector3(0.7, 0.78, 0.85) }, uSkyZ: { value: new THREE.Vector3(0.3, 0.5, 0.85) }, uSunView: { value: new THREE.Vector3(0, 1, 0) } };
+  const U = { uNight: { value: 0 }, uTime: { value: 0 }, uSkyH: { value: new THREE.Vector3(0.7, 0.78, 0.85) }, uSkyZ: { value: new THREE.Vector3(0.3, 0.5, 0.85) }, uSunView: { value: new THREE.Vector3(0, 1, 0) }, uGlint: { value: 700 }, uWaveN: { value: 8 }, uWaveR: { value: 1.3 } };
   const skyMat = skyMaterial(U);
   const sky = new THREE.Mesh(new THREE.SphereGeometry(100000, 48, 24), skyMat);
   sky.renderOrder = -100; sky.frustumCulled = false;
@@ -232,7 +232,22 @@ export async function createEngine(o) {
       name.textContent = p.name; el.append(head, name); el.style.display = 'none';
       el.addEventListener('click', (e) => { e.stopPropagation(); o.onPin && o.onPin(p.id); });
       labelRoot.appendChild(el);
-      return { el, key: String(p.name || '').toLowerCase(), kind: p.kind, on: false, pos: new THREE.Vector3(x, groundZ(x, -y) + (p.h || 8) + 3, -y) };
+      const P = { el, key: String(p.name || '').toLowerCase(), kind: p.kind, on: false, pos: new THREE.Vector3(x, groundZ(x, -y) + (p.h ?? 8) + 3, -y), dragging: false, last: null };
+      if (p.drag) {                                    // a handle: drag it over the ground, double-click removes it
+        el.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); el.setPointerCapture(e.pointerId); P.dragging = true; });
+        el.addEventListener('pointermove', (e) => {
+          if (!P.dragging) return;
+          const g = groundAtClient(e.clientX, e.clientY);
+          if (g) { const [gx, gy] = lonLatToLocal(frame, g.lon, g.lat); P.pos.set(gx, groundZ(gx, -gy) + 3, -gy); P.last = g; }
+        });
+        el.addEventListener('pointerup', (e) => {
+          if (!P.dragging) return;
+          P.dragging = false; try { el.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+          if (P.last) { const g = P.last; P.last = null; o.onPinDrop && o.onPinDrop(p.id, g.lat, g.lon); }
+        });
+        el.addEventListener('dblclick', (e) => { e.stopPropagation(); o.onPinDouble && o.onPinDouble(p.id); });
+      }
+      return P;
     });
   }
   function updatePins() {
@@ -268,7 +283,7 @@ export async function createEngine(o) {
   tiles.onTileGone = removeLabels;
   tiles.q = Q;
   // hand edits from edits.js: buildings to leave out (as points inside them) and roads to add (as local metres)
-  tiles.edits = {
+  const baseEdits = tiles.edits = {
     hide: HIDDEN_BUILDINGS.flatMap((c) => { const p = parseCode(c); return p ? lonLatToLocal(frame, p.lon, p.lat) : []; }),
     tanks: WATER_TANKS.flatMap((c) => { const p = parseCode(c); return p ? lonLatToLocal(frame, p.lon, p.lat) : []; }),
     roads: EXTRA_ROADS.map((r) => ({ cls: r.cls, pts: r.points.flatMap(([lat, lon]) => lonLatToLocal(frame, lon, lat)) })),
@@ -681,14 +696,34 @@ export async function createEngine(o) {
 
   // ---------------------------------------------------------------- picking
   const ray = new THREE.Raycaster();
-  let downAt = null;
+  let downAt = null, pickCb = null;
   listen(canvas, 'pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
+  // where the ray from the camera through the pointer meets the ground: march along it, then bisect
+  function groundPoint() {
+    const o = ray.ray.origin, d = ray.ray.direction; let t = 1, step = 2;
+    for (let i = 0; i < 2500 && t < 60000; i++) {
+      if (o.y + d.y * t <= terrain.heightAt(o.x + d.x * t, -(o.z + d.z * t))) {
+        let a = t - step, c = t;
+        for (let k = 0; k < 20; k++) { const m = (a + c) / 2; if (o.y + d.y * m <= terrain.heightAt(o.x + d.x * m, -(o.z + d.z * m))) c = m; else a = m; }
+        const [lon, lat] = localToLonLat(frame, o.x + d.x * c, -(o.z + d.z * c));
+        return { lat, lon };
+      }
+      t += step; step *= 1.04;
+    }
+    return null;
+  }
+  function groundAtClient(cx, cy) {
+    const rect = canvas.getBoundingClientRect();
+    ray.setFromCamera(new THREE.Vector2(((cx - rect.left) / rect.width) * 2 - 1, -((cy - rect.top) / rect.height) * 2 + 1), camera);
+    return groundPoint();
+  }
   listen(canvas, 'pointerup', (e) => {
     if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
     const rect = canvas.getBoundingClientRect();
     ray.setFromCamera(new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1), camera);
+    if (pickCb) { const p = groundPoint(); if (p) { const cb = pickCb; pickCb = null; canvas.style.cursor = ''; cb(p); } return; }
     const hit = ray.intersectObjects(tiles.buildingGroup.children.filter((m) => m.visible), false)[0];
-    if (!hit) { o.onPick(null); return; }
+    if (!hit) { o.onPick(null, groundPoint()); return; }
     o.onPick(describeHit(hit, e.clientX, e.clientY));
   });
   function describeHit(hit, px, py) {
@@ -761,6 +796,11 @@ export async function createEngine(o) {
     sun.shadow.mapSize.set(Q.shadows || 1024, Q.shadows || 1024);
     if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; }
     bloom.enabled = Q.bloom;
+    const aoSamples = name === 'ultra' ? 12 : 8;                  // High: a lighter ambient-occlusion pass
+    gtao.updateGtaoMaterial({ samples: aoSamples }); gtao.updatePdMaterial({ samples: aoSamples });
+    const waveN = { lite: 4, low: 5, medium: 6, high: 8, ultra: 12 }[name] || 8;           // waves in the water shader: the biggest cost on weaker graphics cards
+    U.uWaveN.value = waveN; U.uWaveR.value = Math.pow(10, 1 / (waveN - 1));                    // same range of wave sizes, spread over fewer waves
+    U.uGlint.value = name === 'high' || name === 'ultra' ? 1600 : 700;      // sharper sun sparkles on the water where the machine can afford the detail
     trafficVersion = -1;
     if (carMesh && carMesh.userData.n !== Q.cars) { scene.remove(carMesh, busMesh, lightMesh); carMesh.dispose(); busMesh.dispose(); lightMesh.dispose(); carMesh = busMesh = lightMesh = null; }
     applyTime();
@@ -875,7 +915,7 @@ export async function createEngine(o) {
       const p = tiles.progress();
       const frac = p.leaves ? (p.covered + p.ready) / (2 * p.leaves) : 0;
       o.onProgress(0.3 + 0.7 * frac, `Raising the buildings · ${p.ready} of ${p.leaves} map tiles`);
-      if ((p.leaves && p.covered === p.leaves && p.ready / p.leaves > 0.5) || performance.now() - t0 > 25000) { ready = true; o.onReady(); }
+      if ((p.leaves && p.covered === p.leaves && p.ready / p.leaves > 0.35) || performance.now() - t0 > 15000) { ready = true; o.onReady(); }
     }
     lastJs = performance.now() - frameStart;
   }
@@ -896,6 +936,17 @@ export async function createEngine(o) {
     },
     flyTo,
     selectAt,
+    /** edits made in the app: { hide: [[lat, lon]], tanks: [[lat, lon]], roads: [{ cls, points: [[lat, lon], ...] }] }, added to the ones in edits.js */
+    setMapEdits(m) {
+      const flat = (l) => (l || []).flatMap(([la, lo]) => lonLatToLocal(frame, lo, la));
+      tiles.setEdits({
+        hide: [...baseEdits.hide, ...flat(m.hide)], tanks: [...baseEdits.tanks, ...flat(m.tanks)],
+        roads: [...baseEdits.roads, ...(m.roads || []).map((r) => ({ cls: r.cls, pts: flat(r.points) }))],
+      });
+    },
+    /** the next click on the ground (not on the camera drag) calls cb({ lat, lon }); one shot */
+    pickGround(cb) { pickCb = cb; canvas.style.cursor = 'crosshair'; },
+    cancelPick() { pickCb = null; canvas.style.cursor = ''; },
     // heights typed in by the user in edit mode: [[lat, lon, metres], ...]
     setHeightFixes(list) { tiles.setFixes(list.map(([lat, lon, h]) => { const [x, y] = lonLatToLocal(frame, lon, lat); return { x, y, h }; })); },
     setNeedle(el) { needle = el; },
